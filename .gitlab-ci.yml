@@ -1,0 +1,218 @@
+stages:
+  - build
+  - test
+  - deploy
+  - sonar_analysis
+
+variables:
+  SONAR_HOST_URL: "https://sonarqube.socs.uoguelph.ca"
+  SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+  GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  SONAR_FRONTEND_TOKEN: 'sqp_818230b89ae5835db6fa06df258b8f33f9211654'
+  SONAR_FETCHER_TOKEN: "sqp_246010999c2873dce3d145619054bb7491115da3"
+  SONAR_BACKEND_TOKEN: "sqp_9caca35403306fc0cc86a8a469f162b0a34d1f07"
+
+cache:
+  key: $CI_COMMIT_REF_SLUG
+  paths:
+    - .gradle/wrapper
+    - .gradle/caches
+    - frontend/node_modules
+
+# ------------------- Backend Jobs -------------------
+
+# Lint Backend using Checkstyle
+lint-backend:
+  stage: test
+  image: eclipse-temurin:17-jdk  # Use a JDK 17 image
+  script:
+    - cd backend
+    - chmod +x ./gradlew
+    - ./gradlew checkstyleMain
+  allow_failure: false  # Fail the pipeline if linting fails
+  parallel:
+    matrix:
+      - { TEST_ENV: "checkstyle" }
+  only:
+    - merge_requests
+    - branches
+
+# Build, Test, and Calculate Coverage for Backend
+build-and-test-backend:
+  stage: build
+  image: eclipse-temurin:17-jdk  # Use a JDK 17 image
+  script:
+    - cd backend
+    - chmod +x ./gradlew
+    - ./gradlew test jacocoTestReport
+  artifacts:
+    paths:
+      - backend/build/reports/jacoco/test/
+      - backend/build/reports/tests/test  # Store JUnit test results
+  allow_failure: false  # Fail the pipeline if tests fail
+  parallel:
+    matrix:
+      - { TEST_ENV: "build-test" }
+  only:
+    - merge_requests
+    - branches
+
+# ------------------- Frontend Jobs -------------------
+
+# Lint Frontend using ESLint
+lint-frontend:
+  stage: test
+  image: node:18  # Use a Node.js image for frontend linting
+  script:
+    - cd frontend
+    - npm install --include=dev
+    - npm run lint
+  cache:
+    paths:
+      - frontend/node_modules
+  only:
+    - merge_requests
+    - branches
+  allow_failure: false  # Fail the pipeline if linting fails
+  parallel:
+    matrix:
+      - { TEST_ENV: "eslint" }
+
+# Test Frontend using Jest
+test-frontend:
+  stage: test
+  image: node:18  # Use a Node.js image for frontend testing
+  variables:
+    NODE_ENV: "development"  # Set environment to development for testing
+  script:
+    - cd frontend
+    - npm install --include=dev
+    - npm run test -- --ci --coverage  # Run Jest in CI mode with coverage
+  cache:
+    paths:
+      - frontend/node_modules
+  artifacts:
+    paths:
+      - frontend/coverage/
+  only:
+    - merge_requests
+    - branches
+  allow_failure: false  # Fail the pipeline if tests fail
+  parallel:
+    matrix:
+      - { TEST_ENV: "jest" }
+
+# ------------------- Fetcher Jobs -------------------
+
+# TEST STAGE - Running API Python unit tests with pytest and coverage
+test-fetcher:
+  stage: test
+  image: python:3.9-slim
+  variables:
+    PYTHONUNBUFFERED: "1" # Ensures Python output is displayed immediately
+    PYTHONPATH: "/builds/cis3760f24/apaline/ecolens/datagatherer" # Sets the Python module search path
+  coverage: '/TOTAL.*?(\d+%)$/'
+  script:
+    - echo "Running Data Gatherer Tests"
+    - cd datagatherer
+    - pip install --no-cache-dir -r requirements.txt
+    - cd tests
+    - pytest --cov=../ --cov-report xml:coverage.xml --junitxml=report.xml
+  artifacts:
+    paths:
+      - datagatherer/tests/report.xml
+      - datagatherer/tests/coverage.xml
+  only:
+    - merge_requests
+    - branches
+  allow_failure: false
+
+# ------------------- Deployment -------------------------------
+
+deploy:
+  stage: deploy
+  image: node:18
+  resource_group: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+  before_script:
+    # Install ssh-agent if not already installed, it's required by Docker.
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+
+    # Run ssh-agent (inside the build environment)
+    - eval $(ssh-agent -s)
+
+    # Give the right permissions, otherwise ssh-add will refuse to add files
+    # Add the SSH key stored in SSH_PRIVATE_KEY file type CI/CD variable to the agent store
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - ssh-add "$SSH_PRIVATE_KEY"
+
+    # Create the SSH directory and give it the right permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+
+    - ssh-keyscan -t rsa,ed25519 apaline.socs.uoguelph.ca >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - ssh $SSH_USER@$SSH_ADDRESS "cd ecolens && mkdir -p ./.ci-deploy-logs && ./docker-redeploy.sh -b main 2>&1 | tee ./.ci-deploy-logs/$CI_COMMIT_SHORT_SHA && exit"
+
+# ------------------- SonarQube -------------------
+
+sonar_analysis_fetcher:
+  stage: sonar_analysis
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - cd datagatherer
+    - sonar-scanner
+        -Dsonar.projectKey=apaline_fetcher
+        -Dsonar.sources=.
+        -Dsonar.host.url=$SONAR_HOST_URL
+        -Dsonar.login=$SONAR_FETCHER_TOKEN
+        -Dsonar.junit.reportPaths=tests/report.xml
+        -Dsonar.python.coverage.reportPaths=tests/coverage.xml
+        -Dsonar.qualitygate.wait=false
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+sonar_analysis_backend:
+  image: gradle:8.2.0-jdk17-jammy
+  stage: sonar_analysis
+  script:
+    - cd backend
+    - gradle build -x checkstyleMain -x checkstyleTest sonar -Dsonar.token=$SONAR_BACKEND_TOKEN  #must build because sonar needs binaries for parts of the analysis
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ------------------- Frontend Sonarqube -------------------
+
+sonar_analysis_frontend:
+  image: sonarsource/sonar-scanner-cli:latest
+  stage: sonar_analysis
+  script:
+    - cd frontend
+    - npm install # Install project dependencies
+    - npm run build # Compile TypeScript to JavaScript
+    - npm run test -- --ci --coverage 
+    - sonar-scanner
+      -Dsonar.projectKey=apaline_frontend
+      -Dsonar.sources=.
+      -Dsonar.host.url=$SONAR_HOST_URL
+      -Dsonar.login=$SONAR_FRONTEND_TOKEN
+      -Dsonar.qualitygate.wait=true
+      -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+      -Dsonar.exclusions="src/setupProxy.js,src/__tests__/**,eslint.config.js,src/components/ExceedancesByLocation.tsx,src/mocks/**,src/index.tsx,src/pages/**,src/App.tsx,src/jest.config.js,public/mockServiceWorker.js"
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ------------------- Optional Notifications -------------------
+
+after_script:
+  - echo "Pipeline completed"
+

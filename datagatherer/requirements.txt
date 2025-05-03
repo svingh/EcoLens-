@@ -1,0 +1,8 @@
+asyncio
+urllib3
+requests
+pytest
+pytest-asyncio
+pytest-mock
+pytest-cov
+datetime

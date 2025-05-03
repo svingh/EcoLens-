@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  backend:  # The Spring application service
+    build:
+      context: ./backend  # Builds the Docker image from the Dockerfile located in the './backend' directory
+      args:
+        - ENVIRONMENT=$ENVIRONMENT # For integration testing, set ENVIRONMENT to 'test'
+    ports:
+      - "8080:8080"  # Maps port 8080 on the container to port 8080 on the host
+    environment:  # Environment variables for the Spring application
+      - DB_ADDRESS=jdbc:mysql://database:3306  # JDBC URL for the MySQL database
+      - DB_DATABASE=template_db  # The name of the database to use
+      - DB_USER=root  # Database username
+      - DB_PASSWORD=pwd  # Database password
+      - DOCKER_BUILDKIT=1 # Potential optimization for gradle build
+    networks:
+      - backend-database  # Network for communicating with the MySQL service
+      - backend-frontend  # Network for communicating with the frontend
+
+  database:  # The MySQL database service
+    build: ./database  # Builds the Docker image from the Dockerfile in the './database' directory
+    environment:  # Environment variables for the MySQL service
+      - MYSQL_ROOT_PASSWORD=pwd  # The root password for MySQL
+      - MYSQL_DATABASE=template_db  # The database to create when the container starts
+    volumes:  # Persistent storage for the MySQL database
+      - mariadb_data:/var/lib/mysql  # Maps 'mariadb_data' volume to the data directory of MySQL
+    networks:
+      - backend-database  # Network for communicating with the backend
+    ports:
+      - "3306:3306"  # Maps port 3306 on the container to port 3306 on the host
+
+  frontend:  # The React frontend service    
+    build: 
+      context: ./frontend  # Builds the Docker image from the Dockerfile in the './frontend' directory
+      args:
+        - ENVIRONMENT=$ENVIRONMENT
+    ports:
+      - "3000:3000"  # Maps port 3000 on the container to port 3000 on the host
+    environment:  # Environment variable for the React service
+      - BACKEND_PROXY=http://backend:8080  # The URL to the backend Spring service
+      - WATCHPACK_POLLING=true  # Watch for file changes in the frontend
+    depends_on:
+      - backend
+    networks:
+      - backend-frontend  # Network for communicating with the backend and datagatherer
+    volumes:  # Mounts the frontend source directory for live code updates
+      - ./frontend/src/:/usr/src/app/src/
+
+  datagatherer:  # The Flask data gatherer service
+    build: ./datagatherer  # Builds the Docker image from the Dockerfile in the './datagatherer' directory
+    networks:
+      - backend-database  # Network for communicating with the MySQL service (if needed)
+    depends_on:
+      - backend
+
+volumes:
+  mariadb_data:  # Defines a named volume 'mariadb_data' for MySQL persistence
+
+networks:
+  backend-database:  # Network for backend, database, and datagatherer
+  backend-frontend:  # Network for backend, frontend, and datagatherer

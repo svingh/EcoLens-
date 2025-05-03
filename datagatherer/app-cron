@@ -1,0 +1,4 @@
+# This file must have LF line endings.
+#
+# Run the application daily, at 12:00 am.
+0 0 * * * /usr/local/bin/python3 /usr/src/app/app.py >> /usr/src/app/app.log 2>&1

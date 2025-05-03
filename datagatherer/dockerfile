@@ -1,0 +1,34 @@
+# Use an official Python runtime as the base image
+FROM python:3.9-slim
+
+# Set the working directory
+WORKDIR /usr/src/app
+
+# Set Python environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/usr/src/app
+
+# Install Python dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install cron
+RUN apt-get update && apt-get -y install cron
+
+# Copy the rest of the application code
+COPY . .
+
+# Update permissions for the application cron job.
+RUN chmod 0644 ./app-cron
+
+# Update permissions for the python application.
+RUN chmod +x ./app.py
+
+# Register the cron job.
+RUN crontab ./app-cron
+
+# Create application log for reading/writing.
+RUN touch ./app.log
+
+# Run cron and read logs to container
+CMD python3 -u ./app.py && cron && tail -f ./app.log

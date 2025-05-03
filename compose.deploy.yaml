@@ -1,0 +1,88 @@
+services:
+  swag:  # reverse proxy
+    image: lscr.io/linuxserver/swag:latest
+    container_name: swag
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - URL=apaline.socs.uoguelph.ca
+      - VALIDATION=http
+      - STAGING=false  # optional
+    volumes:
+      - ./swag/config:/config
+    ports:
+      - "443:443"
+      - "80:80"  # optional
+    depends_on:
+      - frontend
+    networks:
+      - swag-frontend
+    restart: unless-stopped
+
+  backend:  # The Spring application service
+    build:
+      context: ./backend  # Builds the Docker image from the Dockerfile located in the './backend' directory
+      args:
+        - ENVIRONMENT=production
+    ports:
+      - "8080:8080"  # Maps port 8080 on the container to port 8080 on the host
+    environment:
+      - DB_ADDRESS=jdbc:mysql://database:3306
+      - DB_DATABASE=template_db
+      - DB_USER=root
+      - DB_PASSWORD=pwd
+    networks:
+      - backend-database
+      # - swag-frontend
+      - backend-frontend
+    restart: unless-stopped
+
+  database:  # The MySQL database service
+    build: ./database  # Builds the Docker image from the Dockerfile in the './mysql' directory
+    #Environment Variables: Used to configure the MySQL server, like setting the root password (MYSQL_ROOT_PASSWORD) and specifying the database to create at startup (MYSQL_DATABASE).
+    environment:  # Environment variables for the MySQL service
+      - MYSQL_ROOT_PASSWORD=pwd  # The root password for MySQL
+      - MYSQL_DATABASE=template_db  # The database to create when the container starts
+    #Volumes: volumes: - mariadb_data:/var/lib/mysql mounts the named volume mariadb_data to /var/lib/mysql inside the container, providing persistent storage for the database.
+    volumes:  # Persistent storage for the MySQL database
+      - mariadb_data:/var/lib/mysql  # Maps 'mariadb_data' volume to the data directory of MySQL
+    networks:  # Network the MySQL service is connected to
+      - backend-database  # Network for communicating with the Spring service
+    ports:
+      - "3306:3306"  # Exposes port 3306 on the host and maps it to port 3306 in the container
+
+  frontend:  # The React frontend service    
+    build: 
+      context: ./frontend
+      args:
+        - ENVIRONMENT=production
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_PROXY=http://backend:8080
+      - WATCHPACK_POLLING=true
+    networks:
+      - backend-frontend
+      - swag-frontend
+    volumes:
+      - ./frontend/src/:/usr/src/app/src/
+    restart: unless-stopped
+
+  datagatherer:  # The Flask data gatherer service
+    build: ./datagatherer
+    depends_on:
+      - backend
+    networks:
+      - backend-database
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:
+
+networks:
+  backend-database:
+  backend-frontend:
+  swag-frontend:
